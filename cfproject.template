@@ -1,0 +1,157 @@
+{
+    "AWSTemplateFormatVersion": "2010-09-09",
+    "Resources": {
+
+        "EC2SG": {
+            "Type": "AWS::EC2::SecurityGroup",
+            "Properties": {
+                "SecurityGroupIngress" : [
+                    {
+                        "IpProtocol" : "tcp",
+                        "FromPort" : 22,
+                        "ToPort" : 22,
+                        "CidrIp" : "0.0.0.0/0"
+                    }
+                ],
+                "GroupDescription": "Allows SSH",
+                "Tags" : [ {"Key" : "Name", "Value" : "EC2SG"} ]
+            }
+        },
+        "HealthCareEC2": {
+            "Type": "AWS::EC2::Instance",
+            "Properties": {
+                "InstanceType" : "t2.micro",
+                "ImageId" : "ami-0c02fb55956c7d316",
+                "KeyName" : "HealthcareEC2",
+                "SecurityGroups" : [{ "Ref" : "EC2SG" }],
+                "Tags" : [ {"Key" : "Name", "Value" : "HealthCareEC2"} ]
+            }
+        },
+        "AnomalyDynamoDB" : {
+        "Type" : "AWS::DynamoDB::Table",
+        "Properties" : {
+                "AttributeDefinitions" : [
+                    {
+                        "AttributeName" : "deviceid",
+                        "AttributeType" : "S"
+                    },
+                    {
+                        "AttributeName" : "timestamp",
+                         "AttributeType" : "S"
+                    }
+
+                ],
+                "KeySchema" : [
+                    {
+                        "AttributeName" : "deviceid",
+                        "KeyType" : "HASH"
+                    },
+                    {
+                        "AttributeName" : "timestamp",
+                        "KeyType" : "RANGE"
+                    }
+                ],
+                "ProvisionedThroughput" : {
+                    "ReadCapacityUnits" : "5",
+                    "WriteCapacityUnits" : "5"
+                },
+                "Tags" : [ {"Key" : "Name", "Value" : "AnomalyDynamoDB"} ],
+                "TableName" : "m03p02_anomaly_data"
+            }
+        },
+        "RawdataStream": {
+            "Type": "AWS::Kinesis::Stream",
+            "Properties": {
+                "Name": "m03p02_raw_data_stream",
+                "ShardCount": 1
+            }
+        },
+        "AnomalySNSTopic": {
+            "Type": "AWS::SNS::Topic",
+            "Properties": {
+                "Subscription": [
+                    {
+                        "Endpoint": "pvharishsundar@gmail.com",
+                        "Protocol": "email"
+                    }
+                ],
+                "TopicName": "m03p02_anomaly_alerts"
+
+            }
+        },
+        "HealthcareCodeBucket" : {
+            "Type" : "AWS::S3::Bucket"
+        },
+        "AnomalyHandler" : {
+            "Type" : "AWS::Lambda::Function",
+            "Properties" : {
+                "Description" : "Anomaly Handler",
+                "FunctionName" : "AnomalyLambdaHandler",
+                "Role" : "arn:aws:iam::710870509886:role/AnomalyLambdaRole",
+                "Runtime" : "python3.9",
+                "Timeout" : 60,
+                "Handler" : "index.lambda_handler",
+                "Code" : {
+                    "ZipFile" : {
+                        "Fn::Join": [
+                            "\n",
+                        [
+                            "from pprint import pprint",
+                            "import boto3",
+                            "import json",
+                            "import csv",
+                            "import datetime",
+                            "import os",
+                            "import random",
+                            "import base64",
+                            "from decimal import Decimal",
+                            "from botocore.exceptions import ClientError",
+
+                            "def lambda_handler(event, context):",
+                            "    AWS_REGION = 'us-east-1'",
+                            "    #print(event)",
+                            "    dynamodb_res = boto3.resource('dynamodb', region_name=AWS_REGION)",
+                            "    anomaly_table = dynamodb_res.Table('m03p02_anomaly_data')",
+                            "    sns_client = boto3.client('sns', region_name=AWS_REGION)",
+                            "    topic_arn = \"arn:aws:sns:us-east-1:710870509886:m03p02_anomaly_alerts\"",
+
+                            "    for record in event['Records']:",
+                            "        data_point = base64.b64decode(record['kinesis']['data'])",
+                            "        data_point = str(data_point, 'utf-8')",
+                            "        pprint(data_point, sort_dicts=False)",
+                            "        data_point = json.loads(data_point)",
+                            "        anomaly_type = {}",
+                            "        if data_point[\"value\"] <= (1.1 * float(data_point['lowest_temp'])):",
+                            "            anomaly_type = \"Cold\"",
+                            "        elif data_point[\"value\"] >= (0.9 * float(data_point['highest_point'])):",
+                            "            anomaly_type = \"Hot\"",
+                            "        anomaly_data = {'deviceid': data_point[\"deviceid\"],'anomalyDate': data_point[\"date\"],",
+                            "        'timestamp': data_point[\"timestamp\"],'value': data_point[\"value\"],'anomalyType': anomaly_type}",
+
+                            "        anomaly_data = json.loads(json.dumps(anomaly_data), parse_float=Decimal)",
+                            "        response = anomaly_table.put_item(Item=anomaly_data)",
+                            "        #pprint(\"DB Response Data: \", response)",
+                            "        sns_client.publish(TopicArn=topic_arn,Message=str(\"Anomaly value = \" + str(anomaly_data['value']) + \" is detected. \" + \"Detcted temperature can be categorized as \" + anomaly_data['anomalyType']) ,",
+                            "        Subject=str(anomaly_data['anomalyType'] + \" temperature is detected.\"))",
+
+                            "    return 1"
+                            ]
+                        ]
+                    }
+                }
+            }
+        },
+        "Kinesistrigger" : {
+            "Type" : "AWS::Lambda::EventSourceMapping",
+            "Properties" : {
+                "EventSourceArn" : "arn:aws:kinesis:us-east-1:710870509886:stream/m03p02_raw_data_stream",
+                "FunctionName": {
+                    "Ref": "AnomalyHandler"
+                },
+                "StartingPosition" : "TRIM_HORIZON"
+            }
+        }
+    }
+}
+
+

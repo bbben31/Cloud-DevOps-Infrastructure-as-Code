@@ -1,0 +1,9 @@
+version: 0.0
+os: linux
+files:
+    - source: /
+      destination: /
+hooks:
+    ApplicationStart:
+        - location: rawdata-start.sh
+          timeout: 300
